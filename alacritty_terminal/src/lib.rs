@@ -39,6 +39,7 @@ pub mod term;
 pub mod tty;
 pub mod util;
 pub mod vi_mode;
+pub mod sixel;
 
 pub use crate::grid::Grid;
 pub use crate::term::Term;

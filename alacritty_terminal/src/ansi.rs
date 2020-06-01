@@ -93,9 +93,19 @@ pub struct Processor {
     parser: vte::Parser,
 }
 
+use crate::sixel::SixelDecoder;
+
+impl Default for ProcessorState {
+    fn default() -> Self {
+        ProcessorState::Empty
+    }
+}
+
 /// Internal state for VTE processor.
-struct ProcessorState {
-    preceding_char: Option<char>,
+enum ProcessorState {
+    Empty,
+    PrecedingChar(char),
+    SixelData(SixelDecoder)
 }
 
 /// Helper type that implements `vte::Perform`.
@@ -122,7 +132,8 @@ impl<'a, H: Handler + TermInfo + 'a, W: io::Write> Performer<'a, H, W> {
 
 impl Default for Processor {
     fn default() -> Processor {
-        Processor { state: ProcessorState { preceding_char: None }, parser: vte::Parser::new() }
+        Processor { state: ProcessorState::default(),
+                    parser: vte::Parser::new() }
     }
 }
 
@@ -147,6 +158,7 @@ pub trait TermInfo {
     fn lines(&self) -> Line;
     fn cols(&self) -> Column;
 }
+
 
 /// Type that handles actions from the parser.
 ///
@@ -705,7 +717,7 @@ where
     #[inline]
     fn print(&mut self, c: char) {
         self.handler.input(c);
-        self.state.preceding_char = Some(c);
+        *self.state = ProcessorState::PrecedingChar(c);
     }
 
     #[inline]
@@ -724,7 +736,12 @@ where
     }
 
     #[inline]
-    fn hook(&mut self, params: &[i64], intermediates: &[u8], ignore: bool, _c: char) {
+    fn hook(&mut self, params: &[i64], intermediates: &[u8], ignore: bool, c: char) {
+        if c == 'q' {
+            *self.state = ProcessorState::SixelData(SixelDecoder::new());
+            dbg!("hooking SIXEL");
+            return;
+        }
         debug!(
             "[unhandled hook] params={:?}, ints: {:?}, ignore: {:?}",
             params, intermediates, ignore
@@ -733,12 +750,27 @@ where
 
     #[inline]
     fn put(&mut self, byte: u8) {
-        debug!("[unhandled put] byte={:?}", byte);
+        match self.state {
+            ProcessorState::SixelData(parser) => parser.put(byte),
+            _ => {
+                debug!("[unhandled put] byte={:?}", byte);
+            }
+        }
     }
 
     #[inline]
     fn unhook(&mut self) {
-        debug!("[unhandled unhook]");
+        let state = std::mem::take(self.state);
+
+        match state {
+            ProcessorState::SixelData(sixel) => {
+                dbg!("SIXEL DONE");
+                dbg!(sixel.xsize);
+                dbg!(sixel.ysize);
+                let rgb = sixel.into_rgb();
+            },
+            _ => debug!("[unhandled unhook]")
+        }
     }
 
     // TODO replace OSC parsing with parser combinators.
@@ -939,7 +971,7 @@ where
                 handler.move_up(Line(arg_or_default!(idx: 0, default: 1) as usize));
             },
             ('b', None) => {
-                if let Some(c) = self.state.preceding_char {
+                if let ProcessorState::PrecedingChar(c) = *self.state {
                     for _ in 0..arg_or_default!(idx: 0, default: 1) {
                         handler.input(c);
                     }
